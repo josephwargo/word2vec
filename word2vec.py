@@ -4,27 +4,22 @@ class word2vec(object):
     # constructor
     def __init__ (self, corpus, features, window, stepSize=.025):
         """
-        constructor method
+        Constructor
         """
         self.features = features
         self.window = window
         self.stepSize = stepSize
-        # corpus for training
         self.corpus = corpus
-        # unique words in corpus
         self.corpusWords = [y for x in self.corpus for y in x]
         self.corpusWords = list(set(self.corpusWords))
         self.corpusWords.sort()
-        np.random.seed(42)
-        # embeddings for when a word is context
-        self.allContext = np.random.normal(0, .001, (len(self.corpusWords),features))
-        # embeddings for when a word is center
-        self.allCenter = np.random.normal(0, .001, (len(self.corpusWords),features))
         # dictionary for index of each word
         self.word2ind = self.initWord2Ind()
-        # window length
-        # self.concurrenceMatrix = self.computeConcurenceMatrix()
-
+        # random values to initiate embeddings
+        np.random.seed(42)
+        self.allContext = np.random.normal(0, .001, (len(self.corpusWords),features))
+        self.allCenter = np.random.normal(0, .001, (len(self.corpusWords),features))
+        
     def initWord2Ind(self):
         """
         Creating dictionary that turns a string for a word into its embedding index
@@ -34,74 +29,110 @@ class word2vec(object):
             word2ind[self.corpusWords[i]] = i
         return word2ind
     
-    def probability(self, contextIndex, centerIndex):
+    def probability(self, contextEmbedding, centerEmbedding):
         """
         For a single center and context word pair:
             1. Takes the dot product of their respective embeddings
             2. Applies softmax
         """
-        # embedding for context word
-        context = self.allContext[contextIndex]
-        # embedding for center word
-        center = self.allCenter[centerIndex]
-        # calculating dot product and applying softmax to normalize to probability distribution
-        numerator = np.exp(np.dot(context, center))
-        denominator = np.sum(np.exp(np.dot(self.allContext, center)))
+        # calculating the numerator, which is a 1d vector the length of the number of embeddings in the function
+        numerator = np.dot(contextEmbedding, centerEmbedding)
+        numerator = np.exp(numerator - np.max(numerator))
+        # determining denominator, which is a scalar - the same for all context words
+        denominator = np.dot(self.allContext, centerEmbedding)
+        denominator = np.sum(np.exp(denominator - np.max(denominator)))
         probability = numerator / denominator
         return probability
 
-    # 'expected' output
-    def contextExpected(self, centerIndex):
+    # NOTE: this is the expected value for the context word, but is used to calculate
+    # the gradient that updates the center word vector
+    def contextExpected(self, centerEmbedding):
         """
         For a given center word:
-            1. Calculates the probability of this center word and every single
-            word in the corpus as context
+            1. For each context word, calculates the (softmax) probability of that context word
+            given this center word
             2. Multiplies the embedding for each context word by its respective probability
-        TODO: vectorize
+            3. Takes the sum of this matrix along the x axis, giving us a vector of length=
+            number of embeddings
+        The output is the 'context embedding' of the theoretical context word the model would
+        predict for this center word given the current weights
         """
-        expected = np.empty((self.features))
-        for contextWord in self.corpusWords:
-            contextIndex = self.word2ind[contextWord]
-            prob = self.probability(contextIndex, centerIndex)
-            contextEmbedding = self.allContext[contextIndex]*prob
-            expected = np.vstack((expected, contextEmbedding))
-        return np.sum(expected, axis=0)
-    
-    # 'expected' output
-    def centerExpected(self, contextIndex, centerIndex):
-        prob = self.probability(contextIndex, centerIndex)
-        centerEmbedding = self.allCenter[centerIndex]
-        expected = centerEmbedding*prob
+        prob = self.probability(self.allContext, centerEmbedding)
+        expected = self.allContext * prob.reshape(len(self.corpusWords),1)
+        expected = np.sum(expected, axis=0)
         return expected
     
-    def contextSGD(self):
-        # U = previousU - stepSize * (gradient of loss(previousU, previousV))
-        pass
+    # NOTE: this is the expected value for the center word, but is used to calculate
+    # the gradient that updates the context word vector
+    def centerExpected(self, contextEmbedding, centerEmbedding):
+        """
+        For a given context/center word pair:
+            1. Calculate the (softmax) probability of the context word given a center word
+            2. Multiply this probability by the embedding for the center word
+        TODO: Understand what this "represents"
+        """
+        prob = self.probability(contextEmbedding, centerEmbedding)
+        expected = centerEmbedding * prob
+        return expected
         
-    def contextGradient(self, contextIndex, centerIndex):
-        observed = self.allContext[contextIndex]
-        expected = self.contextExpected(centerIndex)
-        gradient = observed - expected
-        return -gradient
+    def gradientWRTCenter(self, contextIndex, centerIndex):
+        """
+        Determine the gradient of the loss function with respect to the center word
+        for a given context/center word pair:
+            1. Get the observed embedding for the context word
+            2. Calculate the expected context word embedding given the center word
+            3. Subtract the expected from the observed
+            4. Return the negative of this value
+        """
+        centerEmbedding = self.allCenter[centerIndex]
+        observedContext = self.allContext[contextIndex]
+        expectedContext = self.contextExpected(centerEmbedding)
+        gradientWRTCenter = observedContext - expectedContext
+        return -gradientWRTCenter
     
-    def centerGradient(self, contextIndex, centerIndex):
-        observed = self.allContext[centerIndex]
-        expected = self.centerExpected(contextIndex, centerIndex)
-        gradient = observed - expected
-        return -gradient
+    def gradientWRTContext(self, contextIndex, centerIndex):
+        """
+        TODO: verify that the understanding of expected and observed is valid here
+        Determine the gradient of the loss function with respect to the context word
+        for a given context/center word pair:
+            1. Get the observed embedding for the center word
+            2. Calculate the expected center word embedding given the center word
+            3. Subtract the expected from the observed
+            4. Return the negative of this value
+        """
+        contextEmbedding = self.allContext[contextIndex]
+        observedCenter = self.allCenter[centerIndex]
+        expectedCenter = self.centerExpected(contextEmbedding, observedCenter)
+        gradientWRTContext = observedCenter - expectedCenter
+        return -gradientWRTContext
 
-    # updating context word vector
     def updateContext(self, contextIndex, centerIndex):
-        gradient = self.contextGradient(contextIndex, centerIndex)
+        """
+        Update the context word embedding for a given context/center pair:
+            1. Calculate the gradient with respect to the context word
+            2. Multiply this by the step size
+            3. Subtract this value from the actual context embedding
+        """
+        gradient = self.gradientWRTContext(contextIndex, centerIndex)
         context = self.allContext[contextIndex]
         self.allContext[contextIndex] = context - self.stepSize * gradient
     
     def updateCenter(self, contextIndex, centerIndex):
-        gradient = self.centerGradient(contextIndex, centerIndex)
+        """
+        Update the center word embedding for a given context/center pair:
+            1. Calculate the gradient with respect to the center word
+            2. Multiply this by the step size
+            3. Subtract this value from the actual center embedding
+        """
+        gradient = self.gradientWRTCenter(contextIndex, centerIndex)
         center = self.allCenter[contextIndex]
         self.allCenter[contextIndex] = center - self.stepSize * gradient
 
     def trainModel(self, epochs=1):
+        """
+        Update context and center word vectors while looping through the
+        entire corpus
+        """
         for i in range(epochs):
             for work in self.corpus:
                 for wordIndex, word in enumerate(work):
@@ -109,10 +140,11 @@ class word2vec(object):
                     for windowIndex in range(-self.window, self.window+1):
                         instanceIndex = wordIndex + windowIndex
                         if (instanceIndex >= 0) and (instanceIndex < len(work)):
-                            contextWord = work[instanceIndex]
-                            contextIndex = self.word2ind[contextWord]
-                            self.updateContext(contextIndex, centerIndex)
-                            self.updateCenter(contextIndex, centerIndex)
+                            if windowIndex != 0:
+                                contextWord = work[instanceIndex]
+                                contextIndex = self.word2ind[contextWord]
+                                self.updateContext(contextIndex, centerIndex)
+                                self.updateCenter(contextIndex, centerIndex)
 
     def predictWord(self, word):
         wordIndex = self.word2ind[word]
@@ -122,50 +154,6 @@ class word2vec(object):
         mostLikelyWordIndex = np.argmax(outputDistribution)
         mostLikelyWord = self.corpusWords[mostLikelyWordIndex]
         return mostLikelyWord
-    
-    # calculating the error of a positive sample
-    # def positiveSampleError(self, contextIndex, centerIndex):
-    #     probability = self.probability(contextIndex, centerIndex)
-    #     error = (1 - error) * self.stepSize
-    #     return error
-
-
-    # def oldGradient(self, work, wordIndex):
-    #     gradient = np.empty((1,self.features))
-    #     centerIndex = self.word2ind[work[wordIndex]]
-    #     expected = self.expected(centerIndex)
-    #     # iterating through window range
-    #     for windowIndex in range(-self.window, self.window+1):
-    #         instanceIndex = wordIndex + windowIndex
-    #         if (instanceIndex >= 0) and (instanceIndex < len(work)):
-    #             observed = self.allContext[self.word2ind[work[instanceIndex]]]
-    #             gradient = np.vstack((gradient, observed))
-    #     return -(np.sum(gradient, axis=0) - expected)
-
-    # def computeConcurenceMatrix(self):
-    #     # initiating matrix of 0s
-    #     concurenceMatrix = np.zeros((len(self.corpusWords), len(self.corpusWords)))
-    #     # word counts
-    #     # iterating through each unique word
-    #     for word in self.corpusWords:
-    #         # choosing each work in the corpus
-    #         for work in self.corpus:
-    #             # choosing each word in the work
-    #             for corpusIndex, matchingWord in enumerate(work):
-    #                 # determining if a given word in the work is what we're looking to provide a value to in the matrix
-    #                 if word == matchingWord:
-    #                     # checking for instances of other words within the chosen window size
-    #                     for windowValue in range(-self.window,self.window+1):
-    #                         instanceIndex = corpusIndex + windowValue
-    #                         # ensuring the window is within bounds
-    #                         if (instanceIndex >= 0) and (instanceIndex < len(work)):
-    #                             instanceWord = work[instanceIndex]
-    #                             # adding a value to the 'counter' in the matrix
-    #                             if word != instanceWord:
-    #                                 x = self.word2ind[instanceWord]
-    #                                 y = self.word2ind[word]
-    #                                 concurenceMatrix[x,y]+=1
-    #     return concurenceMatrix
 
 
 if __name__ == "__main__":
